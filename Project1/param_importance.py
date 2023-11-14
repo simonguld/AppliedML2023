@@ -21,7 +21,8 @@ from tensorflow import keras
 from keras import models, layers, regularizers
 from keras.wrappers.scikit_learn import KerasRegressor
 
-from sklearn.ensemble import AdaBoostRegressor, GradientBoostingRegressor, RandomForestRegressor
+from sklearn import metrics
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.model_selection import train_test_split, cross_val_score, cross_validate, GridSearchCV, RandomizedSearchCV
 from sklearn.cluster import MiniBatchKMeans, KMeans, Birch, BisectingKMeans
@@ -183,9 +184,6 @@ def clustering_accuracy(X_train, y_train, clustering_labels, Nlabels = None):
     acc = (weight_arr * acc_arr).sum()
 
     return acc, acc_arr, weight_arr
-
-
-
 
 
 def objective(trial, method, param_wrapper, scoring, X_train, y_train):
@@ -493,38 +491,68 @@ def main():
 
     ################ CLASSIFICATION ##################
     ## APP 1: XGBoost
-    xgb_classification, lgbm_random_forest_classification, mlp_classification = False, False, True
+    xgb_classification, lgb_classification, mlp_classification = False, False, False
     if xgb_classification:
         xgb_classifier(X_train, X_val, y_train, y_val, scaled_test_features)
-    elif lgbm_random_forest_classification:
+    elif lgb_classification:
 
-        ## APP 2: LGBM Random forest
-        
-        run_baseline_model, hyperoptimization, evaluate_best_model = False, False, True
+        ## APP 2: LGBM 
+        feature_importance, hyperoptimization, evaluate_best_model = False, False, False
         ## After some experimenting, it turns out that choosing the 15 best features as estimated by the rf model 
         # considerably worsens performance, whereas choosing xgb preffered features doesn't hinder performance. 
         # These have therefore been chosen.
-        lgbm_rf_kwargs = dict(boosting_type='rf', num_leaves=120, \
-                            max_depth=14, learning_rate=0.2, n_estimators=200, \
+        lgb_kwargs = dict(boosting_type='gbdt', num_leaves=120, \
+                            max_depth=6, learning_rate=0.2, n_estimators=250, \
                             objective='binary', min_split_gain=0.0,\
-                            min_child_samples=1,
+                            min_child_samples=1, subsample = 1.0,
                             reg_alpha=0.0, reg_lambda=0.0, \
-                            n_jobs=-1, bagging_fraction = .1, bagging_freq = 1) #, importance_type='split') #vs 'gain'
-        #lgbm_rf_kwargs = dict(boosting_type='rf', bagging_fraction = .999, bagging_freq = 1)
-
+                            n_jobs=-1, importance_type = 'split') 
+ 
+        # XGB's choice of features are better than that of LGBM
         good_features_lgb = list(np.loadtxt('Classification_SimonGuldager_XGBoost_VariableList.txt', dtype = "str"))
+        np.savetxt('Classification_SimonGuldager_LGB_GBDT_VariableList.txt',\
+                        np.array(good_features_lgb, dtype='str'), delimiter=',',fmt="%s")
+        
+        if 0:
+            lgb_clf = lgb.LGBMClassifier(**lgb_kwargs)
+            lgb_clf.fit(X_train[good_features_lgb], y_train, eval_set = [(X_val[good_features_lgb], y_val)], verbose=0)
 
-        if run_baseline_model:
+            evaluate_classification_results(lgb_clf, X_train[good_features_lgb], \
+                                            X_val[good_features_lgb], y_train, y_val, method_name='LGB RF', plot=True)
 
-            lgb_clf = lgb.LGBMClassifier(**lgbm_rf_kwargs)
-            lgb_clf.fit(X_train[good_features_lgb], y_train, eval_set = [(X_val[good_features_lgb], y_val)], \
-                        eval_metric='binary', callbacks=[lgb.early_stopping(50)])
+
+        if feature_importance:
+
+            lgb_clf = lgb.LGBMClassifier(**lgb_kwargs)
+            lgb_clf.fit(X_train, y_train, eval_set = [(X_val, y_val)], \
+                        callbacks=[lgb.early_stopping(50)])
             
-            _, benchmark_stats_rf = evaluate_classification_results(lgb_clf, X_train[good_features_lgb], \
-                                    X_val[good_features_lgb], y_train, y_val, method_name ='LGBM RF', plot=True)
-            np.savetxt('benchmark_performance_lgb_rf.txt', benchmark_stats_rf)
+            print(lgb_clf.feature_importances_)
+            
+            evaluate_classification_results(lgb_clf, X_train, \
+                                    X_val, y_train, y_val, method_name ='LGBM GDBT', plot=True)
 
-        benchmark_stats_rf = np.loadtxt('benchmark_performance_lgb_rf.txt')
+            ## Step 2: Extract the 20 most important features
+            good_features_lgb_indices = np.argsort(-lgb_clf.feature_importances_)[:15]
+            good_features_lgb = X_train.columns[good_features_lgb_indices]
+        
+            # Save good features for lgb
+            np.savetxt('Classification_SimonGuldager_LGB_GBDT_VariableList.txt',\
+                        np.array(good_features_lgb, dtype='str'), delimiter=',',fmt="%s")
+           
+            # Fit again to ensure that performance is not hurt
+            lgb_clf = lgb.LGBMClassifier(**lgb_kwargs)
+            lgb_clf.fit(X_train[good_features_lgb], y_train, eval_set = [(X_val[good_features_lgb], y_val)], \
+                        callbacks=[lgb.early_stopping(50)])
+
+            print(lgb_clf.feature_importances_)
+
+            benchmark_train, benchmark_val = evaluate_classification_results(lgb_clf, X_train[good_features_lgb], \
+                                    X_val[good_features_lgb], y_train, y_val, method_name ='LGBM GDBT', plot=True)
+            
+            np.savetxt('benchmark_performance_lgb_clf.txt', benchmark_val)
+
+        benchmark_stats_lgb = np.loadtxt('benchmark_performance_lgb_clf.txt')
 
         ## STEP 2: Hyperopt and avoid overtraining
         if hyperoptimization:
@@ -533,79 +561,87 @@ def main():
             good_features_lgb = list(np.loadtxt('Classification_SimonGuldager_XGBoost_VariableList.txt', dtype = "str"))
 
             # define wrapper holding the model parameters
-            def lgb_rf_wrapper(trial):
+            def lgb_clf_wrapper(trial):
+
+                importance_types = ["gain", "split"]
+                importance_type = trial.suggest_categorical("importance_type", importance_types)
+
                 # set constant parameters
-                lgb_rf_kwargs = dict(boosting_type='rf', min_split_gain=0.0,\
+                lgb_clf_kwargs = dict(boosting_type='gbdt', min_split_gain=0.0,\
                                       reg_alpha=0.0, reg_lambda=0.0,
                                       objective='binary', n_jobs=-1)
                 # set parameters to vary                  
-                lgb_rf_kwargs_var =  {#'subsample': trial.suggest_float('subsample', 0.6,1),
-                            'n_estimators': trial.suggest_int('n_estimators',500,2000),
+                lgb_clf_kwargs_var =  {#'subsample': trial.suggest_float('subsample', 0.6,1),
+                            'n_estimators': trial.suggest_int('n_estimators',250,400),
                             'learning_rate': trial.suggest_float('learning_rate', 0.1, 0.4),
-                            'max_depth': trial.suggest_int('max_depth', 10,50), \
-                            'num_leaves': trial.suggest_int('num_leaves',60,300), \
-                            'bagging_fraction': trial.suggest_float('bagging_fraction', 0.01,0.99),\
-                            'bagging_freq': trial.suggest_int('bagging_freq', 1, 10)}
+                            'max_depth': trial.suggest_int('max_depth', 4,10), \
+                            'num_leaves': trial.suggest_int('num_leaves',50, 200), \
+                            'subsample': trial.suggest_float('subsample', 0.75,1),\
+                            'importance_type': importance_type,}
                 
-                lgb_rf_kwargs.update(lgb_rf_kwargs_var)
-                return lgb_rf_kwargs
+                lgb_clf_kwargs.update(lgb_clf_kwargs_var)
+                return lgb_clf_kwargs
 
             # create optimization object
             study = optuna.create_study(direction="maximize",sampler=TPESampler(),pruner=MedianPruner(n_warmup_steps=50))
   
             # create objective function to pass and optimize
-            restricted_objective = lambda trial: objective(trial, lgb.LGBMClassifier, lgb_rf_wrapper, \
+            restricted_objective = lambda trial: objective(trial, lgb.LGBMClassifier, lgb_clf_wrapper, \
                                 scoring='neg_log_loss', X_train = X_train[good_features_lgb], y_train = y_train)
             study.optimize(restricted_objective, n_trials=30, show_progress_bar=False)
         
             print(study.best_trial.params)
             print(study.best_trial.values)
 
-            lgb_rf_params = dict(boosting_type='rf', min_split_gain=0.0,\
+            lgb_clf_params = dict(boosting_type='gbdt', min_split_gain=0.0,\
                                       reg_alpha=0.0, reg_lambda=0.0,
                                       objective='binary', n_jobs=-1)
             
-            lgb_rf_params.update(study.best_trial.params)
-            print("Optimized parameters", lgb_rf_params)
+            lgb_clf_params.update(study.best_trial.params)
+            print("Optimized parameters", lgb_clf_params)
             ## Fit using the best parameters and evaluate results
-            lgb_rf_clf = lgb.LGBMClassifier(**lgb_rf_params)
-            lgb_rf_clf.fit(X_train[good_features_lgb], y_train, eval_set = [(X_val[good_features_lgb], y_val)], verbose=0)
+            lgb_clf = lgb.LGBMClassifier(**lgb_clf_params)
+            lgb_clf.fit(X_train[good_features_lgb], y_train, eval_set = [(X_val[good_features_lgb], y_val)], verbose=0)
 
-            evaluate_classification_results(lgb_rf_clf, X_train[good_features_lgb], \
+            evaluate_classification_results(lgb_clf, X_train[good_features_lgb], \
                                             X_val[good_features_lgb], y_train, y_val, method_name='LGB RF', plot=True)
 
-            print("Benchmark stats for logloss, acc, AUC: ", benchmark_stats_rf)
+            print("Benchmark stats for logloss, acc, AUC: ", benchmark_stats_lgb)
+
+            # Save best parameters
+            with open('best_params_lgb_clf.pkl', 'wb') as fp:
+                pickle.dump(lgb_clf_params, fp)
 
             ## save beset model
-            lgb_rf_clf.booster_.save_model('lgb_rf_classifier.json')
+            lgb_clf.booster_.save_model('lgb_classifier.json')
 
 
         if evaluate_best_model:
             # Load optimized parameters
-            with open('best_params_lgb_rf.pkl', 'rb') as fp:
-                lgb_rf_params = pickle.load(fp)
-            
+            with open('best_params_lgb_clf.pkl', 'rb') as fp:
+                lgb_clf_params = pickle.load(fp)
+            print(lgb_clf_params)
             ## Fit using the best parameters and evaluate results
-            lgb_rf_clf = lgb.LGBMClassifier(**lgb_rf_params)
-            lgb_rf_clf.fit(X_train[good_features_lgb], y_train, eval_set = [(X_val[good_features_lgb], y_val)], verbose=0)
+            lgb_clf = lgb.LGBMClassifier(**lgb_clf_params)
+            lgb_clf.fit(X_train[good_features_lgb], y_train, eval_set = [(X_val[good_features_lgb], y_val)], verbose=0)
 
-            evaluate_classification_results(lgb_rf_clf, X_train[good_features_lgb], \
+            evaluate_classification_results(lgb_clf, X_train[good_features_lgb], \
                                             X_val[good_features_lgb], y_train, y_val, method_name='LGB RF', plot=True)
 
-            print("Benchmark stats for logloss, acc, AUC: ", benchmark_stats_rf)
+            print("Benchmark stats for logloss, acc, AUC: ", benchmark_stats_lgb)
 
             # make predictions on test data
-            test_pred = lgb_rf_clf.predict_proba(scaled_test_features[good_features_lgb])[:,1]
+            test_pred = lgb_clf.predict_proba(scaled_test_features[good_features_lgb])[:,1]
      
             # save results to file
-            with open('Classification_SimonGuldager_LGB_RandomForest.txt', 'w') as file:
+            with open('Classification_SimonGuldager_LGB_GBDT.txt', 'w') as file:
                 # Iterate over the array elements
                 for i, value in enumerate(test_pred):
                     # Write the index and value separated by a comma
                     file.write(f'{i}, {value}\n')
  
     if mlp_classification:
-        explore_solutions, hyperoptimization, predict_test_labels = False, True, False
+        explore_solutions, hyperoptimization, predict_test_labels = False, False, True
 
         good_features_mlp = list(np.loadtxt('Classification_SimonGuldager_XGBoost_VariableList.txt', dtype = "str"))
         Ninput = len(good_features_mlp)
@@ -644,12 +680,37 @@ def main():
 
             evaluate_classification_results(mlp, X_train[good_features_mlp], X_val[good_features_mlp], y_train, y_val, method_name='MLP', plot=True)
         if predict_test_labels:
-            pass
+            ## update kwargs with best params
+            mlp_kwargs = dict(hidden_layer_sizes=(Ninput, 64, 128, 256, 256, 128, 64), activation='relu', solver='adam', alpha=0.0001,\
+                            batch_size=128, learning_rate='constant', learning_rate_init = 0.003, max_iter=25, \
+                                shuffle=True, tol=0.0001, verbose=True, warm_start=False, momentum=0.9, \
+                                    early_stopping=True, validation_fraction=0.1, beta_1=0.9, beta_2=0.999,\
+                                        epsilon=1e-08, n_iter_no_change=5)
+            mlp_kwargs['batch_size'] = 1024
+            mlp_kwargs['learning_rate_init'] = 0.00173
+
+            mlp = MLPClassifier(**mlp_kwargs)
+            mlp.fit(X_train[good_features_mlp], y_train)
+
+            evaluate_classification_results(mlp, X_train[good_features_mlp], X_val[good_features_mlp], y_train, y_val, method_name='MLP', plot=True)
+
+            # Predict test labels
+            test_pred = mlp.predict_proba(scaled_test_features[good_features_mlp])[:,1]
+
+            from joblib import dump, load
+            dump(mlp, 'mlp.joblib')
+
+            # save results to file
+            if 0:
+                with open('Classification_SimonGuldager_SKLEARN_MLP.txt', 'w') as file:
+                    # Iterate over the array elements
+                    for i, value in enumerate(test_pred):
+                        # Write the index and value separated by a comma
+                        file.write(f'{i}, {value}\n')
 
 
 
-
-    ################## REGRESSION ####################¨
+    ################## REGRESSION ####################
 
     if 0:
         # Do a minimal implementation of XGBoost
@@ -686,7 +747,7 @@ def main():
         evaluate_predictions(val_pred, y_reg_val, label='val')
         evaluate_predictions(train_pred, y_reg_train, label='train')
 
-    lgb_regression, tf_regression = False, False
+    lgb_regression, tf_regression, rf_regression = False, False, False
     if lgb_regression:
  
         ## APP 2: LGBM Boosted trees
@@ -935,6 +996,43 @@ def main():
             for i, value in enumerate(test_pred):
                 # Write the index and value separated by a comma
                 file.write(f'{i}, {value}\n')
+
+    if rf_regression:
+        good_features_rf = list(np.loadtxt('Regression_SimonGuldager_LGB_GBDT_VariableList.txt', dtype = "str"))
+
+        ## These params have already been optimized (in terms of n_estimators, max_depth, max_samples)
+        rf_kwargs = dict(n_estimators=356, criterion='squared_error', max_depth=22, \
+                 min_samples_split=2, min_samples_leaf=15,  \
+                 max_features='sqrt', max_leaf_nodes=None, \
+                 bootstrap=True, n_jobs=-1, verbose=0,\
+                  ccp_alpha=0.0, max_samples=0.826)
+      
+        rf = RandomForestRegressor(**rf_kwargs)
+        rf.fit(X_reg_train[good_features_rf], y_reg_train)
+
+        train_pred = rf.predict(X_reg_train[good_features_rf])
+        val_pred = rf.predict(X_reg_val[good_features_rf])
+
+        evaluate_predictions(train_pred, y_reg_train, label = 'train', quantiles = None, verbose = 1)
+        evaluate_predictions(val_pred, y_reg_val, label = 'val', quantiles = None, verbose = 1)
+
+   
+        # Make test data predictions
+        # make predictions on test data
+        test_pred = rf.predict(scaled_test_features[good_features_rf])
+        
+        # Save model
+        from joblib import dump
+        dump(rf, 'rf.joblib')
+        
+        if 0:
+            # save results to file
+            with open('Regression_SimonGuldager_SKLearn_RandomForest.txt', 'w') as file:
+                # Iterate over the array elements
+                for i, value in enumerate(test_pred):
+                    # Write the index and value separated by a comma
+                    file.write(f'{i}, {value}\n')
+ 
 
 
     ################ CLUSTERING #######################
