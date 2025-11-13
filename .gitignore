@@ -166,3 +166,7 @@ cython_debug/
 .h5
 .html
 .csv
+.gz
+.tar
+.joblib
+
