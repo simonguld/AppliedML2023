@@ -160,13 +160,15 @@ cython_debug/
 #.idea/
 
 # Custom exclusions
-.txt
+*.txt
 .pkl
 .json
 .h5
-.html
+*.html
 .csv
-.gz
-.tar
-.joblib
+*.gz
+*.tar
+*.joblib
 
+*/data/*
+*/output/*
