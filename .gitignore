@@ -169,6 +169,8 @@ cython_debug/
 *.gz
 *.tar
 *.joblib
+*.pt
 
+*/dataset/*
 */data/*
 */output/*
